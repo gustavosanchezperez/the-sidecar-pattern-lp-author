@@ -47,7 +47,7 @@ impl Order {
 
 /// This is our service handler. It receives a Request, routes on its
 /// path, and returns a Future of a Response.
-async fn handle_request(req: Request<Body>, pool: Pool) -> Result<Response<Body>, anyhow::Error> {
+async fn handle_request(req: Request<Body>, pool: Pool, rate_url:String) -> Result<Response<Body>, anyhow::Error> {
     match (req.method(), req.uri().path()) {
         // CORS OPTIONS
         (&Method::OPTIONS, "/init") => Ok(response_build(&String::from(""))),
@@ -68,8 +68,6 @@ async fn handle_request(req: Request<Body>, pool: Pool) -> Result<Response<Body>
         }
 
         (&Method::POST, "/create_order") => {
-            let rate_url = "http://127.0.0.1:8001/find_rate";
-
             let mut conn = pool.get_conn().await.unwrap();
             let byte_stream = hyper::body::to_bytes(req).await?;
             let mut order: Order = serde_json::from_slice(&byte_stream).unwrap();
@@ -156,7 +154,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("App started. Wait for Dapr sidecar to start ...");
     sleep(Duration::from_millis(1500)).await;
 
-    let opts = Opts::from_url("mysql://root:root@127.0.0.1:3306/mysql").unwrap();
+    let client = dapr::Dapr::new(3503);
+    let dapr_db= client.get_secret("local-store", "APP_URL:DATABASE").await?;
+    let db_url = dapr_db["APP_URL:DATABASE"].as_str().unwrap();
+    let dapr_rate = client.get_secret("local-store", "APP_URL:SALES_TAX_RATE_SERVICE").await?;
+    let rate_url = String::from(dapr_rate["APP_URL:SALES_TAX_RATE_SERVICE"].as_str().unwrap());
+
+    let opts = Opts::from_url(db_url).unwrap();
     let builder = OptsBuilder::from_opts(opts);
     // The connection pool will have a min of 5 and max of 10 connections.
     let constraints = PoolConstraints::new(5, 10).unwrap();
@@ -166,10 +170,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = SocketAddr::from(([0, 0, 0, 0], 8003));
     let make_svc = make_service_fn(|_| {
         let pool = pool.clone();
+        let rateurl = rate_url.clone();
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
                 let pool = pool.clone();
-                handle_request(req, pool)
+                handle_request(req, pool, rateurl.clone())
             }))
         }
     });
